@@ -47,7 +47,7 @@ err()   { printf "${RED}[error]${RESET} %s\n" "$*" >&2; }
 # ── Help ─────────────────────────────────────────────────────────────────────
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [OPTIONS]
+Usage: $(basename "$0") [OPTIONS] [NUMBERS...]
 
 Launch Claude Code agents in a tmux session with tiled panes.
 
@@ -57,6 +57,8 @@ Options:
   -n, --dry-run        Show what would be launched without doing it
   -a, --all            Skip interactive picker and launch all agents
   -h, --help           Show this help message
+
+  NUMBERS              Pre-select agents by number (e.g. swarm 2 or swarm 1 3)
 
 Groups:
   Edit the AGENT_GROUPS array in the script to select related repos as a unit.
@@ -72,14 +74,19 @@ EOF
 # ── Argument parsing ─────────────────────────────────────────────────────────
 DRY_RUN=false
 SELECT_ALL=false
+PRESELECT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -s|--session) SESSION_NAME="$2"; shift 2 ;;
-        -d|--dir)     PROJECTS_DIR="$2"; shift 2 ;;
+        -s|--session) [[ $# -lt 2 ]] && { err "-s requires a value"; exit 1; }
+                      SESSION_NAME="$2"; shift 2 ;;
+        -d|--dir)     [[ $# -lt 2 ]] && { err "-d requires a value"; exit 1; }
+                      PROJECTS_DIR="$2"; shift 2 ;;
         -n|--dry-run) DRY_RUN=true; shift ;;
         -a|--all)     SELECT_ALL=true; shift ;;
         -h|--help)    usage ;;
+        # Positional numbers: treat as pre-selections (e.g. swarm 2 or swarm 1,3)
+        [0-9]*)       PRESELECT+="$1 "; shift ;;
         *)            err "Unknown option: $1"; usage ;;
     esac
 done
@@ -200,10 +207,36 @@ echo
 # Determine selected picker indices.
 SELECTED_PICKER=()
 
+# Helper: parse a space-separated string of numbers into SELECTED_PICKER.
+# Returns 0 on success, 1 on error.
+parse_selection() {
+    local input="$1"
+    input="${input//,/ }"
+    SELECTED_PICKER=()
+    for token in $input; do
+        if ! [[ "$token" =~ ^[0-9]+$ ]]; then
+            err "Invalid input: '$token' — enter numbers, 'all', or press Enter."
+            return 1
+        fi
+        local idx=$((token - 1))
+        if (( idx < 0 || idx >= ${#PICKER_LABELS[@]} )); then
+            err "Out of range: $token (valid: 1-${#PICKER_LABELS[@]})"
+            return 1
+        fi
+        SELECTED_PICKER+=("$idx")
+    done
+    [[ ${#SELECTED_PICKER[@]} -gt 0 ]]
+}
+
 if $SELECT_ALL; then
     for i in "${!PICKER_LABELS[@]}"; do
         SELECTED_PICKER+=("$i")
     done
+elif [[ -n "$PRESELECT" ]]; then
+    # Numbers passed on command line (e.g. swarm 2 or swarm 1 3)
+    if ! parse_selection "$PRESELECT"; then
+        exit 1
+    fi
 else
     while true; do
         printf "${BOLD}Select agents${RESET} [enter numbers, 'all', or press Enter for all]: "
@@ -216,28 +249,9 @@ else
             break
         fi
 
-        selection="${selection//,/ }"
-        valid=true
-        SELECTED_PICKER=()
-        for token in $selection; do
-            if ! [[ "$token" =~ ^[0-9]+$ ]]; then
-                err "Invalid input: '$token' — enter numbers, 'all', or press Enter."
-                valid=false
-                break
-            fi
-            idx=$((token - 1))
-            if (( idx < 0 || idx >= ${#PICKER_LABELS[@]} )); then
-                err "Out of range: $token (valid: 1-${#PICKER_LABELS[@]})"
-                valid=false
-                break
-            fi
-            SELECTED_PICKER+=("$idx")
-        done
-
-        if $valid && [[ ${#SELECTED_PICKER[@]} -gt 0 ]]; then
+        if parse_selection "$selection"; then
             break
         fi
-        SELECTED_PICKER=()
     done
 fi
 
