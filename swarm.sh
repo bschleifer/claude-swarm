@@ -69,11 +69,11 @@ Commands (operate on a running session):
   restart [N|all]      Restart Claude in pane N or all panes
   kill                 Kill the entire tmux session
 
-Tmux hotkeys (inside the session):
-  Alt-c                Send "continue" to current pane
-  Alt-C                Send "continue" to ALL panes in current window
-  Alt-r                Restart Claude in current pane
-  Alt-s                Show agent status
+Tmux hotkeys (^b = Ctrl-b, then the key):
+  ^b c                 Continue current pane (press Enter)
+  ^b C                 Continue ALL panes in current window
+  ^b r                 Restart Claude in current pane
+  ^b s                 Show agent status popup
 
 Groups:
   Edit the AGENT_GROUPS array in the script to select related repos as a unit.
@@ -577,24 +577,24 @@ for si in "${!SELECTED_PANES[@]}"; do
         "clear && printf '${entry_banner}\n' && ${CLAUDE_CMD}"
 done
 
-# ── Bind session-level hotkeys ───────────────────────────────────────────────
-# Alt-c: press Enter in current pane (continue Claude)
-tmux bind -n M-c send-keys C-m
+# ── Bind session-level hotkeys (^b prefix) ───────────────────────────────────
+# ^b c: press Enter in current pane (continue Claude)
+tmux bind c send-keys C-m
 
-# Alt-C: press Enter in ALL panes in current window (continue all)
-tmux bind -n M-C set-window-option synchronize-panes on \; \
+# ^b C: press Enter in ALL panes in current window (continue all)
+tmux bind C set-window-option synchronize-panes on \; \
     send-keys C-m \; \
     set-window-option synchronize-panes off
 
-# Alt-r: restart Claude in current pane (Ctrl-C twice, then relaunch)
-tmux bind -n M-r send-keys C-c \; \
+# ^b r: restart Claude in current pane (Ctrl-C twice, then relaunch)
+tmux bind r send-keys C-c \; \
     run-shell "sleep 0.3" \; \
     send-keys C-c \; \
     run-shell "sleep 0.3" \; \
     send-keys "$CLAUDE_CMD --continue" C-m
 
-# Alt-s: show status in a popup (requires tmux 3.2+)
-tmux bind -n M-s display-popup -E -w 60 -h 15 "$SWARM_PATH status"
+# ^b s: show status in a popup (requires tmux 3.2+)
+tmux bind s display-popup -E -w 60 -h 15 "$SWARM_PATH status"
 
 # Select the first window and first pane
 tmux select-window -t "${SESSION_NAME}:agents-1"
