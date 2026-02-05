@@ -190,6 +190,11 @@ cmd_status() {
         idx=$((idx + 1))
     done < <(get_panes)
     echo
+    # If running inside a tmux popup, wait for keypress before closing.
+    if [[ -n "${TMUX_PANE:-}" ]]; then
+        printf "${BOLD}Press any key to close${RESET}"
+        read -rsn1
+    fi
 }
 
 # ── Subcommand: continue ─────────────────────────────────────────────────────
