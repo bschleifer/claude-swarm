@@ -205,8 +205,8 @@ cmd_continue() {
         title=$(basename "$(tmux display-message -p -t "${SESSION_NAME}:${pane_target}" '#{pane_current_path}' 2>/dev/null)" 2>/dev/null || echo "$pane_target")
 
         if [[ "$state" == "IDLE" ]]; then
-            send_text "$pane_target" "continue"
-            ok "Sent 'continue' to $title"
+            tmux send-keys -t "${SESSION_NAME}:${pane_target}" C-m
+            ok "Continued $title"
             sent=$((sent + 1))
         elif [[ "$state" == "EXITED" ]]; then
             send_text "$pane_target" "$CLAUDE_CMD --continue"
@@ -578,12 +578,12 @@ for si in "${!SELECTED_PANES[@]}"; do
 done
 
 # ── Bind session-level hotkeys ───────────────────────────────────────────────
-# Alt-c: send "continue" to current pane
-tmux bind -n M-c send-keys "continue" C-m
+# Alt-c: press Enter in current pane (continue Claude)
+tmux bind -n M-c send-keys C-m
 
-# Alt-C: send "continue" to ALL panes in current window
+# Alt-C: press Enter in ALL panes in current window (continue all)
 tmux bind -n M-C set-window-option synchronize-panes on \; \
-    send-keys "continue" C-m \; \
+    send-keys C-m \; \
     set-window-option synchronize-panes off
 
 # Alt-r: restart Claude in current pane (Ctrl-C twice, then relaunch)
