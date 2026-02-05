@@ -7,8 +7,8 @@ set -euo pipefail
 # Scans ~/projects/ for git repositories and opens each in its own tmux pane
 # with Claude Code ready to go. Panes are tiled 4-per-window.
 #
-# Groups let you bundle related repos into a single pane at a shared working
-# directory. An interactive picker lets you choose which agents to launch.
+# Groups let you select related repos as a unit in the interactive picker.
+# Each member repo gets its own pane.
 ###############################################################################
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -22,12 +22,13 @@ PANES_PER_WINDOW=4
 # Example: AGENTS=("rcg-v6-root" "SillyTavern" "root")
 AGENTS=()
 
-# Groups: bundle related repos into a single agent pane.
-# Format: "Label|working_directory|repo1,repo2,..."
-# The label is the display name. The working dir is where Claude opens.
-# Repos listed here are removed from the individual auto-detect list.
+# Groups: select related repos as a unit in the picker.
+# Format: "Label|repo1,repo2,..."
+# Each member repo gets its own pane. Grouped repos are removed from the
+# individual auto-detect list so they don't appear twice.
 AGENT_GROUPS=(
-    "D365 & Azure|$PROJECTS_DIR|d365-solutions,rcg-azure-functions,rcg-d365-plugins,rcg-d365-webresources"
+    "D365 & Azure|d365-solutions,rcg-azure-functions,rcg-d365-plugins,rcg-d365-webresources"
+    "RCG V6|rcg-v6-root,rcg-v6-agent-1,rcg-v6-agent-2,rcg-v6-agent-3"
 )
 
 # ── Colors ───────────────────────────────────────────────────────────────────
@@ -58,8 +59,8 @@ Options:
   -h, --help           Show this help message
 
 Groups:
-  Edit the AGENT_GROUPS array in the script to bundle related repos into a
-  single agent pane. Format: "Label|working_directory|repo1,repo2,..."
+  Edit the AGENT_GROUPS array in the script to select related repos as a unit.
+  Format: "Label|repo1,repo2,..."  Each member gets its own pane.
   Grouped repos are excluded from individual auto-detection.
 
 By default, all git repositories under ~/projects/ are detected.
@@ -103,8 +104,8 @@ detect_agents() {
         name="$(basename "$dir")"
         # Skip hidden directories
         [[ "$name" == .* ]] && continue
-        # Only include directories with a .git folder
-        [[ -d "$dir/.git" ]] || continue
+        # Only include directories with a .git folder or worktree file
+        [[ -e "$dir/.git" ]] || continue
         agents+=("$name")
     done
     # Sort alphabetically
@@ -117,60 +118,66 @@ if [[ ${#AGENTS[@]} -eq 0 ]]; then
 fi
 
 # ── Build unified entries (groups + individual repos) ────────────────────────
-# Arrays that hold the merged list of launchable items.
-ENTRIES=()    # display label
-PATHS=()      # working directory for the pane
-BANNERS=()    # banner text shown inside the pane
-ENTRY_META=() # "(group: N repos)" or blank — used in picker display
+# Picker-level arrays: one entry per selectable item in the picker.
+PICKER_LABELS=()  # display label
+PICKER_META=()    # "(group: N repos)" or blank
+
+# Pane-level arrays: one entry per actual tmux pane to create.
+# PICKER_PANES[i] holds a space-separated list of pane indices for picker item i.
+PICKER_PANES=()
+PANE_LABELS=()    # display label for the pane
+PANE_PATHS=()     # working directory
+PANE_BANNERS=()   # banner text shown inside the pane
 
 build_entries() {
     # Collect all repo names claimed by groups so we can exclude them.
     local -A grouped_repos
 
     for group in "${AGENT_GROUPS[@]}"; do
-        IFS='|' read -r _label _dir repos <<< "$group"
+        IFS='|' read -r _label repos <<< "$group"
         IFS=',' read -ra repo_list <<< "$repos"
         for r in "${repo_list[@]}"; do
             grouped_repos["$r"]=1
         done
     done
 
-    # Add group entries first.
+    # Add group entries — each member repo gets its own pane.
     for group in "${AGENT_GROUPS[@]}"; do
-        IFS='|' read -r label dir repos <<< "$group"
+        IFS='|' read -r label repos <<< "$group"
         IFS=',' read -ra repo_list <<< "$repos"
         local count=${#repo_list[@]}
 
-        ENTRIES+=("$label")
-        PATHS+=("$dir")
-        ENTRY_META+=("(group: ${count} repos)")
+        PICKER_LABELS+=("$label")
+        PICKER_META+=("(group: ${count} repos)")
 
-        # Build a banner that lists the member repos.
-        local banner
-        banner="═══════════════════════════════════════\n"
-        banner+="  Group: ${label}\n"
-        banner+="  Repos:"
+        local pane_indices=""
         for r in "${repo_list[@]}"; do
-            banner+=" ${r}"
+            local pi=${#PANE_LABELS[@]}
+            pane_indices+="${pi} "
+            PANE_LABELS+=("$r")
+            PANE_PATHS+=("${PROJECTS_DIR}/${r}")
+            PANE_BANNERS+=("═══════════════════════════════════════\n  Agent: ${r}  [${label}]\n═══════════════════════════════════════")
         done
-        banner+="\n═══════════════════════════════════════"
-        BANNERS+=("$banner")
+        PICKER_PANES+=("$pane_indices")
     done
 
     # Add individual repos (excluding any that belong to a group).
     for agent in "${AGENTS[@]}"; do
         if [[ -z "${grouped_repos[$agent]+x}" ]]; then
-            ENTRIES+=("$agent")
-            PATHS+=("${PROJECTS_DIR}/${agent}")
-            ENTRY_META+=("")
-            BANNERS+=("═══════════════════════════════════════\n  Agent: ${agent}\n═══════════════════════════════════════")
+            local pi=${#PANE_LABELS[@]}
+            PICKER_LABELS+=("$agent")
+            PICKER_META+=("")
+            PICKER_PANES+=("$pi")
+            PANE_LABELS+=("$agent")
+            PANE_PATHS+=("${PROJECTS_DIR}/${agent}")
+            PANE_BANNERS+=("═══════════════════════════════════════\n  Agent: ${agent}\n═══════════════════════════════════════")
         fi
     done
 }
 
 build_entries
 
-if [[ ${#ENTRIES[@]} -eq 0 ]]; then
+if [[ ${#PICKER_LABELS[@]} -eq 0 ]]; then
     err "No git repositories found in $PROJECTS_DIR"
     exit 1
 fi
@@ -179,92 +186,87 @@ fi
 printf "\n${BOLD}Claude Code Agent Monitor${RESET}\n\n"
 
 # Show the numbered list.
-for i in "${!ENTRIES[@]}"; do
-    local_meta="${ENTRY_META[$i]}"
+for i in "${!PICKER_LABELS[@]}"; do
+    local_meta="${PICKER_META[$i]}"
     if [[ -n "$local_meta" ]]; then
         printf "  ${GREEN}%2d.${RESET} %-30s ${YELLOW}%s${RESET}\n" \
-            "$((i + 1))" "${ENTRIES[$i]}" "$local_meta"
+            "$((i + 1))" "${PICKER_LABELS[$i]}" "$local_meta"
     else
-        printf "  ${GREEN}%2d.${RESET} %s\n" "$((i + 1))" "${ENTRIES[$i]}"
+        printf "  ${GREEN}%2d.${RESET} %s\n" "$((i + 1))" "${PICKER_LABELS[$i]}"
     fi
 done
 echo
 
-# Determine selected indices.
-SELECTED=()
+# Determine selected picker indices.
+SELECTED_PICKER=()
 
 if $SELECT_ALL; then
-    # --all flag: select everything, no prompt.
-    for i in "${!ENTRIES[@]}"; do
-        SELECTED+=("$i")
+    for i in "${!PICKER_LABELS[@]}"; do
+        SELECTED_PICKER+=("$i")
     done
 else
-    # Interactive prompt.
     while true; do
         printf "${BOLD}Select agents${RESET} [enter numbers, 'all', or press Enter for all]: "
         read -r selection
 
-        # Empty or "all" → select everything.
         if [[ -z "$selection" || "$selection" == "all" ]]; then
-            for i in "${!ENTRIES[@]}"; do
-                SELECTED+=("$i")
+            for i in "${!PICKER_LABELS[@]}"; do
+                SELECTED_PICKER+=("$i")
             done
             break
         fi
 
-        # Parse space/comma-separated numbers.
-        # Replace commas with spaces, then iterate.
         selection="${selection//,/ }"
         valid=true
-        SELECTED=()
+        SELECTED_PICKER=()
         for token in $selection; do
-            # Check it's a positive integer.
             if ! [[ "$token" =~ ^[0-9]+$ ]]; then
                 err "Invalid input: '$token' — enter numbers, 'all', or press Enter."
                 valid=false
                 break
             fi
             idx=$((token - 1))
-            if (( idx < 0 || idx >= ${#ENTRIES[@]} )); then
-                err "Out of range: $token (valid: 1-${#ENTRIES[@]})"
+            if (( idx < 0 || idx >= ${#PICKER_LABELS[@]} )); then
+                err "Out of range: $token (valid: 1-${#PICKER_LABELS[@]})"
                 valid=false
                 break
             fi
-            SELECTED+=("$idx")
+            SELECTED_PICKER+=("$idx")
         done
 
-        if $valid && [[ ${#SELECTED[@]} -gt 0 ]]; then
+        if $valid && [[ ${#SELECTED_PICKER[@]} -gt 0 ]]; then
             break
         fi
-        SELECTED=()
+        SELECTED_PICKER=()
     done
 fi
 
-if [[ ${#SELECTED[@]} -eq 0 ]]; then
+if [[ ${#SELECTED_PICKER[@]} -eq 0 ]]; then
     err "No agents selected."
     exit 1
 fi
 
+# Expand selected picker items into pane indices.
+SELECTED_PANES=()
+for pi in "${SELECTED_PICKER[@]}"; do
+    for pane_idx in ${PICKER_PANES[$pi]}; do
+        SELECTED_PANES+=("$pane_idx")
+    done
+done
+
 # ── Display launch plan ─────────────────────────────────────────────────────
-NUM_SELECTED=${#SELECTED[@]}
-NUM_WINDOWS=$(( (NUM_SELECTED + PANES_PER_WINDOW - 1) / PANES_PER_WINDOW ))
+NUM_PANES=${#SELECTED_PANES[@]}
+NUM_WINDOWS=$(( (NUM_PANES + PANES_PER_WINDOW - 1) / PANES_PER_WINDOW ))
 
-printf "Session: ${CYAN}%s${RESET}  |  Agents: ${CYAN}%d${RESET}  |  Windows: ${CYAN}%d${RESET}\n\n" \
-    "$SESSION_NAME" "$NUM_SELECTED" "$NUM_WINDOWS"
+printf "Session: ${CYAN}%s${RESET}  |  Panes: ${CYAN}%d${RESET}  |  Windows: ${CYAN}%d${RESET}\n\n" \
+    "$SESSION_NAME" "$NUM_PANES" "$NUM_WINDOWS"
 
-for si in "${!SELECTED[@]}"; do
-    idx="${SELECTED[$si]}"
+for si in "${!SELECTED_PANES[@]}"; do
+    pane_idx="${SELECTED_PANES[$si]}"
     win=$(( si / PANES_PER_WINDOW + 1 ))
     pane=$(( si % PANES_PER_WINDOW ))
-    local_meta="${ENTRY_META[$idx]}"
-    label="${ENTRIES[$idx]}"
-    if [[ -n "$local_meta" ]]; then
-        printf "  ${GREEN}%2d.${RESET} %-30s ${YELLOW}(window %d, pane %d)${RESET} %s\n" \
-            "$((si + 1))" "$label" "$win" "$pane" "$local_meta"
-    else
-        printf "  ${GREEN}%2d.${RESET} %-30s ${YELLOW}(window %d, pane %d)${RESET}\n" \
-            "$((si + 1))" "$label" "$win" "$pane"
-    fi
+    printf "  ${GREEN}%2d.${RESET} %-30s ${YELLOW}(window %d, pane %d)${RESET}\n" \
+        "$((si + 1))" "${PANE_LABELS[$pane_idx]}" "$win" "$pane"
 done
 echo
 
@@ -306,12 +308,12 @@ info "Creating tmux session '${SESSION_NAME}'..."
 FIRST=true
 WINDOW_INDEX=0
 
-for si in "${!SELECTED[@]}"; do
-    idx="${SELECTED[$si]}"
+for si in "${!SELECTED_PANES[@]}"; do
+    pane_idx="${SELECTED_PANES[$si]}"
     local_pane=$(( si % PANES_PER_WINDOW ))
-    entry_label="${ENTRIES[$idx]}"
-    entry_path="${PATHS[$idx]}"
-    entry_banner="${BANNERS[$idx]}"
+    entry_label="${PANE_LABELS[$pane_idx]}"
+    entry_path="${PANE_PATHS[$pane_idx]}"
+    entry_banner="${PANE_BANNERS[$pane_idx]}"
 
     # Start of a new window
     if [[ $local_pane -eq 0 ]]; then
@@ -339,7 +341,7 @@ done
 tmux select-window -t "${SESSION_NAME}:agents-1"
 tmux select-pane -t "${SESSION_NAME}:agents-1.0"
 
-ok "Session '${SESSION_NAME}' created with ${NUM_SELECTED} agents across ${NUM_WINDOWS} window(s)."
+ok "Session '${SESSION_NAME}' created with ${NUM_PANES} agents across ${NUM_WINDOWS} window(s)."
 info "Attaching now... (Detach with Ctrl-b d)"
 echo
 
