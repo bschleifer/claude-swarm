@@ -11,6 +11,7 @@ set -euo pipefail
 #   swarm send [N|all] "message"   Send a message to agent(s)
 #   swarm restart [N|all]          Restart agent(s)
 #   swarm kill                     Kill the entire session
+#   swarm watch                    Run notification watcher (auto-started)
 ###############################################################################
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -68,6 +69,12 @@ Commands (operate on a running session):
   send [N|all] "msg"   Send a custom message to pane N or all panes
   restart [N|all]      Restart Claude in pane N or all panes
   kill                 Kill the entire tmux session
+  watch                Run notification watcher (auto-started with session)
+
+Notifications:
+  A background watcher monitors agent states. When an agent finishes and
+  goes idle, the Windows Terminal taskbar flashes and the tmux window tab
+  shows a ! marker. The watcher starts automatically with the session.
 
 Tmux hotkeys (^b = Ctrl-b, then the key):
   ^b c                 Continue current pane (press Enter)
@@ -88,11 +95,42 @@ EOF
 
 # ── Subcommand helpers ───────────────────────────────────────────────────────
 
-# Check that the session exists.
+# Find running swarm session(s). If -s was given, use that. Otherwise auto-detect.
+# Sets SESSION_NAME to the resolved session.
 require_session() {
-    if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-        err "No running session '$SESSION_NAME'. Launch with: swarm"
+    # If the named session exists, use it.
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        return
+    fi
+
+    # Auto-detect: list all tmux sessions, look for swarm-created ones.
+    local sessions=()
+    while IFS= read -r s; do
+        [[ -n "$s" ]] && sessions+=("$s")
+    done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+
+    if [[ ${#sessions[@]} -eq 0 ]]; then
+        err "No tmux sessions running. Launch with: swarm"
         exit 1
+    elif [[ ${#sessions[@]} -eq 1 ]]; then
+        SESSION_NAME="${sessions[0]}"
+    else
+        # Multiple sessions — prompt user to pick.
+        printf "\n${BOLD}Multiple tmux sessions found:${RESET}\n\n"
+        for i in "${!sessions[@]}"; do
+            local pcount
+            pcount=$(tmux list-panes -s -t "${sessions[$i]}" 2>/dev/null | wc -l)
+            printf "  ${GREEN}%d.${RESET} %-30s ${YELLOW}(%d panes)${RESET}\n" \
+                "$((i + 1))" "${sessions[$i]}" "$pcount"
+        done
+        echo
+        printf "${BOLD}Select session${RESET} [number]: "
+        read -r pick
+        if ! [[ "$pick" =~ ^[0-9]+$ ]] || (( pick < 1 || pick > ${#sessions[@]} )); then
+            err "Invalid selection."
+            exit 1
+        fi
+        SESSION_NAME="${sessions[$((pick - 1))]}"
     fi
 }
 
@@ -190,8 +228,8 @@ cmd_status() {
         idx=$((idx + 1))
     done < <(get_panes)
     echo
-    # If running inside a tmux popup, wait for keypress before closing.
-    if [[ -n "${TMUX_PANE:-}" ]]; then
+    # Wait for keypress so tmux popups don't vanish immediately.
+    if [[ -t 0 ]]; then
         printf "${BOLD}Press any key to close${RESET}"
         read -rsn1
     fi
@@ -284,8 +322,53 @@ cmd_kill() {
     ok "Session '$SESSION_NAME' killed."
 }
 
+# ── Subcommand: watch (background notification watcher) ─────────────────────
+# Polls pane states every few seconds. When a pane transitions from WORKING to
+# IDLE, sends a bell to the CLIENT terminal (not the pane) so Windows Terminal
+# flashes the taskbar without corrupting Claude's TUI.
+WATCH_INTERVAL=5
+
+cmd_watch() {
+    require_session
+
+    # Track previous state of each pane so we only notify on transitions.
+    declare -A prev_state
+
+    while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
+        while IFS= read -r pane_target; do
+            state=$(detect_pane_state "${SESSION_NAME}:${pane_target}")
+            prev="${prev_state[$pane_target]:-UNKNOWN}"
+
+            if [[ "$prev" == "WORKING" && "$state" == "IDLE" ]]; then
+                # Agent just finished — ring the bell on the CLIENT terminal.
+                # Never write to pane TTYs — that corrupts Claude's TUI.
+                local client_tty
+                client_tty=$(tmux list-clients -t "$SESSION_NAME" -F '#{client_tty}' 2>/dev/null | head -1)
+                if [[ -n "$client_tty" && -w "$client_tty" ]]; then
+                    printf '\a' > "$client_tty"
+                fi
+            fi
+
+            prev_state["$pane_target"]="$state"
+        done < <(get_panes)
+
+        sleep "$WATCH_INTERVAL"
+    done
+}
+
 # ── Subcommand dispatch ──────────────────────────────────────────────────────
-# Check if the first argument is a subcommand.
+SESSION_EXPLICIT=false
+
+# Parse -s/--session early so it works with subcommands (e.g. swarm -s foo status).
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -s|--session) [[ $# -lt 2 ]] && { err "-s requires a value"; exit 1; }
+                      SESSION_NAME="$2"; SESSION_EXPLICIT=true; shift 2 ;;
+        *)            break ;;
+    esac
+done
+
+# Check if the first remaining argument is a subcommand.
 if [[ $# -gt 0 ]]; then
     case "$1" in
         status)   shift; cmd_status "$@"; exit 0 ;;
@@ -293,6 +376,7 @@ if [[ $# -gt 0 ]]; then
         send)     shift; cmd_send "$@"; exit 0 ;;
         restart)  shift; cmd_restart "$@"; exit 0 ;;
         kill)     shift; cmd_kill "$@"; exit 0 ;;
+        watch)    shift; cmd_watch "$@"; exit 0 ;;
     esac
 fi
 
@@ -304,7 +388,7 @@ PRESELECT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -s|--session) [[ $# -lt 2 ]] && { err "-s requires a value"; exit 1; }
-                      SESSION_NAME="$2"; shift 2 ;;
+                      SESSION_NAME="$2"; SESSION_EXPLICIT=true; shift 2 ;;
         -d|--dir)     [[ $# -lt 2 ]] && { err "-d requires a value"; exit 1; }
                       PROJECTS_DIR="$2"; shift 2 ;;
         -n|--dry-run) DRY_RUN=true; shift ;;
@@ -360,6 +444,7 @@ PICKER_PANES=()
 PANE_LABELS=()    # display label for the pane
 PANE_PATHS=()     # working directory
 PANE_BANNERS=()   # banner text shown inside the pane
+PANE_GROUP=()     # group name (or repo name for individuals) — used for window naming
 
 build_entries() {
     # Collect all repo names claimed by groups so we can exclude them.
@@ -389,6 +474,7 @@ build_entries() {
             PANE_LABELS+=("$r")
             PANE_PATHS+=("${PROJECTS_DIR}/${r}")
             PANE_BANNERS+=("═══════════════════════════════════════\n  Agent: ${r}  [${label}]\n═══════════════════════════════════════")
+            PANE_GROUP+=("$label")
         done
         PICKER_PANES+=("$pane_indices")
     done
@@ -403,6 +489,7 @@ build_entries() {
             PANE_LABELS+=("$agent")
             PANE_PATHS+=("${PROJECTS_DIR}/${agent}")
             PANE_BANNERS+=("═══════════════════════════════════════\n  Agent: ${agent}\n═══════════════════════════════════════")
+            PANE_GROUP+=("$agent")
         fi
     done
 }
@@ -493,6 +580,21 @@ for pi in "${SELECTED_PICKER[@]}"; do
     done
 done
 
+# ── Auto-name session based on selection ────────────────────────────────────
+# When -s wasn't given and the user picked a subset, derive a session name
+# so multiple swarms can coexist (e.g. "swarm 1" + "swarm 2" simultaneously).
+if ! $SESSION_EXPLICIT && ! $SELECT_ALL; then
+    # Build a name from the selected picker labels.
+    auto_parts=()
+    for pi in "${SELECTED_PICKER[@]}"; do
+        auto_parts+=("${PICKER_LABELS[$pi]}")
+    done
+    # Join with "+" and sanitize for tmux (no dots or colons, lowercase).
+    auto_name=$(IFS='+'; echo "${auto_parts[*]}")
+    auto_name=$(echo "$auto_name" | tr '[:upper:]' '[:lower:]' | tr ' &' '-' | tr -d '.' | tr -d ':' | sed 's/--*/-/g; s/^-//; s/-$//')
+    SESSION_NAME="$auto_name"
+fi
+
 # ── Display launch plan ─────────────────────────────────────────────────────
 NUM_PANES=${#SELECTED_PANES[@]}
 NUM_WINDOWS=$(( (NUM_PANES + PANES_PER_WINDOW - 1) / PANES_PER_WINDOW ))
@@ -560,7 +662,7 @@ for si in "${!SELECTED_PANES[@]}"; do
     # Start of a new window
     if [[ $local_pane -eq 0 ]]; then
         WINDOW_INDEX=$(( si / PANES_PER_WINDOW + 1 ))
-        WINDOW_NAME="agents-${WINDOW_INDEX}"
+        WINDOW_NAME="${PANE_GROUP[$pane_idx]}"
 
         if $FIRST; then
             tmux new-session -d -s "$SESSION_NAME" -n "$WINDOW_NAME" -c "$entry_path"
@@ -599,13 +701,20 @@ tmux bind r send-keys C-c \; \
     send-keys "$CLAUDE_CMD --continue" C-m
 
 # ^b s: show status in a popup (requires tmux 3.2+)
-tmux bind s display-popup -E -w 60 -h 15 "$SWARM_PATH status"
+tmux bind s display-popup -E -w 60 -h 15 "$SWARM_PATH -s $SESSION_NAME status"
+
+# ── Enable silence monitoring for idle detection ────────────────────────────
+# When a pane has no output for 15 seconds, tmux flags it in the status bar.
+# This detects agents that finished working and went idle.
+tmux set -t "$SESSION_NAME" -g monitor-silence 15
 
 # Select the first window and first pane
-tmux select-window -t "${SESSION_NAME}:agents-1"
-tmux select-pane -t "${SESSION_NAME}:agents-1.0"
+FIRST_WINDOW="${PANE_GROUP[${SELECTED_PANES[0]}]}"
+tmux select-window -t "${SESSION_NAME}:${FIRST_WINDOW}"
+tmux select-pane -t "${SESSION_NAME}:${FIRST_WINDOW}.0"
 
 ok "Session '${SESSION_NAME}' created with ${NUM_PANES} agents across ${NUM_WINDOWS} window(s)."
+info "Idle agents flagged with ! in status bar. Run 'swarm watch' for taskbar alerts."
 info "Attaching now... (Detach with Ctrl-b d)"
 echo
 
