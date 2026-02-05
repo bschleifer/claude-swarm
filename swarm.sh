@@ -332,6 +332,9 @@ for si in "${!SELECTED_PANES[@]}"; do
         tmux select-layout -t "${SESSION_NAME}:${WINDOW_NAME}" tiled
     fi
 
+    # Set pane title (shows in border via pane-border-status)
+    tmux select-pane -t "${SESSION_NAME}:${WINDOW_NAME}.${local_pane}" -T "$entry_label"
+
     # Send startup commands
     send_to_pane "$SESSION_NAME" "$WINDOW_NAME" "$local_pane" \
         "clear && printf '${entry_banner}\n' && ${CLAUDE_CMD}"
