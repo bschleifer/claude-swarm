@@ -80,7 +80,7 @@ AGENTS=("repo-one" "repo-two" "my-app")
 Bundle related repos into a single agent pane that opens at a shared working directory:
 
 ```bash
-GROUPS=(
+AGENT_GROUPS=(
     "Label|/path/to/working/dir|repo1,repo2,repo3"
 )
 ```
@@ -94,7 +94,7 @@ GROUPS=(
 Example:
 
 ```bash
-GROUPS=(
+AGENT_GROUPS=(
     "D365 & Azure|$PROJECTS_DIR|d365-solutions,rcg-azure-functions,rcg-d365-plugins"
     "Frontend|$PROJECTS_DIR/frontend|app-web,design-system"
 )

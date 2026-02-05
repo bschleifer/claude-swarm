@@ -26,7 +26,7 @@ AGENTS=()
 # Format: "Label|working_directory|repo1,repo2,..."
 # The label is the display name. The working dir is where Claude opens.
 # Repos listed here are removed from the individual auto-detect list.
-GROUPS=(
+AGENT_GROUPS=(
     "D365 & Azure|$PROJECTS_DIR|d365-solutions,rcg-azure-functions,rcg-d365-plugins,rcg-d365-webresources"
 )
 
@@ -58,8 +58,8 @@ Options:
   -h, --help           Show this help message
 
 Groups:
-  Edit the GROUPS array in the script to bundle related repos into a single
-  agent pane. Format: "Label|working_directory|repo1,repo2,..."
+  Edit the AGENT_GROUPS array in the script to bundle related repos into a
+  single agent pane. Format: "Label|working_directory|repo1,repo2,..."
   Grouped repos are excluded from individual auto-detection.
 
 By default, all git repositories under ~/projects/ are detected.
@@ -127,7 +127,7 @@ build_entries() {
     # Collect all repo names claimed by groups so we can exclude them.
     local -A grouped_repos
 
-    for group in "${GROUPS[@]}"; do
+    for group in "${AGENT_GROUPS[@]}"; do
         IFS='|' read -r _label _dir repos <<< "$group"
         IFS=',' read -ra repo_list <<< "$repos"
         for r in "${repo_list[@]}"; do
@@ -136,7 +136,7 @@ build_entries() {
     done
 
     # Add group entries first.
-    for group in "${GROUPS[@]}"; do
+    for group in "${AGENT_GROUPS[@]}"; do
         IFS='|' read -r label dir repos <<< "$group"
         IFS=',' read -ra repo_list <<< "$repos"
         local count=${#repo_list[@]}
