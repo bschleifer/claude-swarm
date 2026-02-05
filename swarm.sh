@@ -2,13 +2,15 @@
 set -euo pipefail
 
 ###############################################################################
-# start-claude-agents.sh — Launch Claude Code agents in tmux panes
+# swarm.sh — Launch and manage Claude Code agents in tmux panes
 #
-# Scans ~/projects/ for git repositories and opens each in its own tmux pane
-# with Claude Code ready to go. Panes are tiled 4-per-window.
-#
-# Groups let you select related repos as a unit in the interactive picker.
-# Each member repo gets its own pane.
+# Subcommands:
+#   swarm [OPTIONS] [NUMBERS...]   Launch agents (default)
+#   swarm status                   Show agent status (idle/working/exited)
+#   swarm continue [N|all]         Send "continue" to agent(s)
+#   swarm send [N|all] "message"   Send a message to agent(s)
+#   swarm restart [N|all]          Restart agent(s)
+#   swarm kill                     Kill the entire session
 ###############################################################################
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -48,17 +50,30 @@ err()   { printf "${RED}[error]${RESET} %s\n" "$*" >&2; }
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS] [NUMBERS...]
+       $(basename "$0") <command> [args]
 
-Launch Claude Code agents in a tmux session with tiled panes.
+Launch and manage Claude Code agents in a tmux session.
 
-Options:
+Launch options:
   -s, --session NAME   Session name (default: $SESSION_NAME)
   -d, --dir PATH       Projects directory (default: $PROJECTS_DIR)
   -n, --dry-run        Show what would be launched without doing it
   -a, --all            Skip interactive picker and launch all agents
   -h, --help           Show this help message
-
   NUMBERS              Pre-select agents by number (e.g. swarm 2 or swarm 1 3)
+
+Commands (operate on a running session):
+  status               Show status of all agents (idle/working/exited)
+  continue [N|all]     Send "continue" to pane N or all panes (default: all)
+  send [N|all] "msg"   Send a custom message to pane N or all panes
+  restart [N|all]      Restart Claude in pane N or all panes
+  kill                 Kill the entire tmux session
+
+Tmux hotkeys (inside the session):
+  Alt-c                Send "continue" to current pane
+  Alt-C                Send "continue" to ALL panes in current window
+  Alt-r                Restart Claude in current pane
+  Alt-s                Show agent status
 
 Groups:
   Edit the AGENT_GROUPS array in the script to select related repos as a unit.
@@ -71,7 +86,212 @@ EOF
     exit 0
 }
 
-# ── Argument parsing ─────────────────────────────────────────────────────────
+# ── Subcommand helpers ───────────────────────────────────────────────────────
+
+# Check that the session exists.
+require_session() {
+    if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        err "No running session '$SESSION_NAME'. Launch with: swarm"
+        exit 1
+    fi
+}
+
+# Get all pane IDs in the session (window:pane format).
+get_panes() {
+    tmux list-panes -s -t "$SESSION_NAME" -F '#{window_index}.#{pane_index}'
+}
+
+# Get pane count.
+get_pane_count() {
+    tmux list-panes -s -t "$SESSION_NAME" | wc -l
+}
+
+# Detect the state of a pane: IDLE, WORKING, or EXITED.
+# IDLE    = Claude is showing the > prompt (waiting for input)
+# WORKING = Claude is running and producing output
+# EXITED  = Claude process has ended, back at shell prompt
+detect_pane_state() {
+    local target="$1"
+    # Get the current command running in the pane.
+    local cmd
+    cmd=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null || echo "")
+
+    # If the foreground process is bash/zsh, Claude has exited.
+    if [[ "$cmd" == "bash" || "$cmd" == "zsh" || "$cmd" == "sh" ]]; then
+        echo "EXITED"
+        return
+    fi
+
+    # Capture the last few lines of the pane to look for Claude's prompt.
+    local content
+    content=$(tmux capture-pane -p -t "$target" -S -5 2>/dev/null || echo "")
+
+    # Claude Code shows ">" at the start of a line when waiting for input,
+    # or "? for shortcuts" when idle.
+    if echo "$content" | grep -qE '^\s*[>❯]|^\? for shortcuts|\? for shortcuts$'; then
+        echo "IDLE"
+    else
+        echo "WORKING"
+    fi
+}
+
+# Send text to a specific pane (by window:pane target).
+send_text() {
+    local target="$1" text="$2"
+    tmux send-keys -t "${SESSION_NAME}:${target}" "$text" C-m
+}
+
+# Resolve pane argument: "all", a number, or default to "all".
+# Outputs a list of window:pane targets.
+resolve_pane_arg() {
+    local arg="${1:-all}"
+    if [[ "$arg" == "all" ]]; then
+        get_panes
+    else
+        if ! [[ "$arg" =~ ^[0-9]+$ ]]; then
+            err "Invalid pane number: $arg"
+            exit 1
+        fi
+        local total
+        total=$(get_pane_count)
+        if (( arg >= total )); then
+            err "Pane $arg does not exist (valid: 0-$((total - 1)))"
+            exit 1
+        fi
+        # Find the actual window:pane for the Nth pane globally.
+        get_panes | sed -n "$((arg + 1))p"
+    fi
+}
+
+# ── Subcommand: status ───────────────────────────────────────────────────────
+cmd_status() {
+    require_session
+    printf "\n${BOLD}Agent Status${RESET}  (session: ${CYAN}%s${RESET})\n\n" "$SESSION_NAME"
+
+    local idx=0
+    while IFS= read -r pane_target; do
+        # Use working directory basename as the display name (Claude overrides pane_title).
+        local pane_path
+        pane_path=$(tmux display-message -p -t "${SESSION_NAME}:${pane_target}" '#{pane_current_path}' 2>/dev/null || echo "")
+        local title
+        title=$(basename "$pane_path" 2>/dev/null || echo "pane-${idx}")
+        local state
+        state=$(detect_pane_state "${SESSION_NAME}:${pane_target}")
+
+        local color
+        case "$state" in
+            IDLE)    color="$GREEN" ;;
+            WORKING) color="$YELLOW" ;;
+            EXITED)  color="$RED" ;;
+            *)       color="$RESET" ;;
+        esac
+
+        printf "  ${CYAN}%d${RESET}  %-25s ${color}%-10s${RESET}\n" "$idx" "$title" "$state"
+        idx=$((idx + 1))
+    done < <(get_panes)
+    echo
+}
+
+# ── Subcommand: continue ─────────────────────────────────────────────────────
+cmd_continue() {
+    require_session
+    local arg="${1:-all}"
+    local sent=0
+
+    while IFS= read -r pane_target; do
+        local state
+        state=$(detect_pane_state "${SESSION_NAME}:${pane_target}")
+        local title
+        title=$(basename "$(tmux display-message -p -t "${SESSION_NAME}:${pane_target}" '#{pane_current_path}' 2>/dev/null)" 2>/dev/null || echo "$pane_target")
+
+        if [[ "$state" == "IDLE" ]]; then
+            send_text "$pane_target" "continue"
+            ok "Sent 'continue' to $title"
+            sent=$((sent + 1))
+        elif [[ "$state" == "EXITED" ]]; then
+            send_text "$pane_target" "$CLAUDE_CMD --continue"
+            ok "Restarted Claude with --continue in $title"
+            sent=$((sent + 1))
+        else
+            info "Skipping $title (currently working)"
+        fi
+    done < <(resolve_pane_arg "$arg")
+
+    if [[ $sent -eq 0 ]]; then
+        info "No idle or exited agents to continue."
+    fi
+}
+
+# ── Subcommand: send ─────────────────────────────────────────────────────────
+cmd_send() {
+    require_session
+    local arg="${1:-}"
+    local message="${2:-}"
+
+    # If first arg is not a number and not "all", treat it as the message.
+    if [[ -n "$arg" && ! "$arg" =~ ^[0-9]+$ && "$arg" != "all" ]]; then
+        message="$arg"
+        arg="all"
+    fi
+
+    if [[ -z "$message" ]]; then
+        err "Usage: swarm send [N|all] \"message\""
+        exit 1
+    fi
+
+    while IFS= read -r pane_target; do
+        local title
+        title=$(basename "$(tmux display-message -p -t "${SESSION_NAME}:${pane_target}" '#{pane_current_path}' 2>/dev/null)" 2>/dev/null || echo "$pane_target")
+        send_text "$pane_target" "$message"
+        ok "Sent to $title"
+    done < <(resolve_pane_arg "$arg")
+}
+
+# ── Subcommand: restart ──────────────────────────────────────────────────────
+cmd_restart() {
+    require_session
+    local arg="${1:-}"
+
+    if [[ -z "$arg" ]]; then
+        err "Usage: swarm restart <N|all>"
+        exit 1
+    fi
+
+    while IFS= read -r pane_target; do
+        local title
+        title=$(basename "$(tmux display-message -p -t "${SESSION_NAME}:${pane_target}" '#{pane_current_path}' 2>/dev/null)" 2>/dev/null || echo "$pane_target")
+
+        # Send Ctrl-C to interrupt, wait, then relaunch.
+        tmux send-keys -t "${SESSION_NAME}:${pane_target}" C-c
+        sleep 0.5
+        # Send exit in case Claude dropped to a sub-prompt.
+        tmux send-keys -t "${SESSION_NAME}:${pane_target}" C-c
+        sleep 0.3
+        send_text "$pane_target" "$CLAUDE_CMD --continue"
+        ok "Restarted $title"
+    done < <(resolve_pane_arg "$arg")
+}
+
+# ── Subcommand: kill ─────────────────────────────────────────────────────────
+cmd_kill() {
+    require_session
+    tmux kill-session -t "$SESSION_NAME"
+    ok "Session '$SESSION_NAME' killed."
+}
+
+# ── Subcommand dispatch ──────────────────────────────────────────────────────
+# Check if the first argument is a subcommand.
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        status)   shift; cmd_status "$@"; exit 0 ;;
+        continue) shift; cmd_continue "$@"; exit 0 ;;
+        send)     shift; cmd_send "$@"; exit 0 ;;
+        restart)  shift; cmd_restart "$@"; exit 0 ;;
+        kill)     shift; cmd_kill "$@"; exit 0 ;;
+    esac
+fi
+
+# ── Argument parsing (launch mode) ───────────────────────────────────────────
 DRY_RUN=false
 SELECT_ALL=false
 PRESELECT=""
@@ -316,6 +536,9 @@ send_to_pane() {
     tmux send-keys -t "${session}:${window}.${pane}" "$cmd" C-m
 }
 
+# Path to this script (for tmux keybindings).
+SWARM_PATH="$(realpath "$0")"
+
 # ── Build the session ────────────────────────────────────────────────────────
 info "Creating tmux session '${SESSION_NAME}'..."
 
@@ -353,6 +576,25 @@ for si in "${!SELECTED_PANES[@]}"; do
     send_to_pane "$SESSION_NAME" "$WINDOW_NAME" "$local_pane" \
         "clear && printf '${entry_banner}\n' && ${CLAUDE_CMD}"
 done
+
+# ── Bind session-level hotkeys ───────────────────────────────────────────────
+# Alt-c: send "continue" to current pane
+tmux bind -n M-c send-keys "continue" C-m
+
+# Alt-C: send "continue" to ALL panes in current window
+tmux bind -n M-C set-window-option synchronize-panes on \; \
+    send-keys "continue" C-m \; \
+    set-window-option synchronize-panes off
+
+# Alt-r: restart Claude in current pane (Ctrl-C twice, then relaunch)
+tmux bind -n M-r send-keys C-c \; \
+    run-shell "sleep 0.3" \; \
+    send-keys C-c \; \
+    run-shell "sleep 0.3" \; \
+    send-keys "$CLAUDE_CMD --continue" C-m
+
+# Alt-s: show status in a popup (requires tmux 3.2+)
+tmux bind -n M-s display-popup -E -w 60 -h 15 "$SWARM_PATH status"
 
 # Select the first window and first pane
 tmux select-window -t "${SESSION_NAME}:agents-1"
