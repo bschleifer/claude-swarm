@@ -47,6 +47,54 @@ ok()    { printf "${GREEN}[ok]${RESET}    %s\n" "$*"; }
 warn()  { printf "${YELLOW}[warn]${RESET}  %s\n" "$*"; }
 err()   { printf "${RED}[error]${RESET} %s\n" "$*" >&2; }
 
+# ── Dynamic UI helpers ──────────────────────────────────────────────────────
+
+# Update the Windows Terminal tab title via OSC 0 escape sequence.
+# Writes to the client TTY (not a pane) so Claude's TUI isn't corrupted.
+update_terminal_title() {
+    local session="$1" idle_count="$2" total_count="$3"
+    local client_tty
+    client_tty=$(tmux list-clients -t "$session" -F '#{client_tty}' 2>/dev/null | head -1)
+    [[ -z "$client_tty" || ! -w "$client_tty" ]] && return
+
+    local title
+    if (( idle_count == 0 )); then
+        title="swarm: all working"
+    else
+        title="swarm: ${idle_count}/${total_count} IDLE"
+    fi
+    printf '\033]0;%s\007' "$title" > "$client_tty"
+}
+
+# Rename tmux windows to include idle pane counts.
+# e.g. "RCG V6" → "RCG V6 (2 idle)" when agents need input.
+update_window_names() {
+    local session="$1"
+    local win_id win_name
+    while IFS=$'\t' read -r win_id win_name; do
+        # Strip any existing " (N idle)" suffix to get the base name.
+        local base_name="${win_name% (*}"
+        local win_idle=0 win_total=0
+        while IFS= read -r _pane_id; do
+            win_total=$((win_total + 1))
+            local pstate
+            pstate=$(tmux show -p -t "${session}:${win_id}.${_pane_id}" -v @swarm_state 2>/dev/null || echo "WORKING")
+            [[ "$pstate" == "IDLE" ]] && win_idle=$((win_idle + 1))
+        done < <(tmux list-panes -t "${session}:${win_id}" -F '#{pane_index}' 2>/dev/null)
+
+        local new_name
+        if (( win_idle > 0 )); then
+            new_name="${base_name} (${win_idle} idle)"
+        else
+            new_name="$base_name"
+        fi
+        # Only rename if changed to avoid flicker.
+        if [[ "$new_name" != "$win_name" ]]; then
+            tmux rename-window -t "${session}:${win_id}" "$new_name" 2>/dev/null || true
+        fi
+    done < <(tmux list-windows -t "$session" -F '#{window_index}'$'\t''#{window_name}' 2>/dev/null)
+}
+
 # ── Help ─────────────────────────────────────────────────────────────────────
 usage() {
     cat <<EOF
@@ -335,9 +383,16 @@ cmd_watch() {
     declare -A prev_state
 
     while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
+        local idle_count=0 total_count=0
+
         while IFS= read -r pane_target; do
             state=$(detect_pane_state "${SESSION_NAME}:${pane_target}")
             prev="${prev_state[$pane_target]:-UNKNOWN}"
+            total_count=$((total_count + 1))
+            [[ "$state" == "IDLE" ]] && idle_count=$((idle_count + 1))
+
+            # Update per-pane state option (drives pane-border-format coloring)
+            tmux set -p -t "${SESSION_NAME}:${pane_target}" @swarm_state "$state" 2>/dev/null || true
 
             if [[ "$prev" == "WORKING" && "$state" == "IDLE" ]]; then
                 # Agent just finished — ring the bell on the CLIENT terminal.
@@ -351,6 +406,10 @@ cmd_watch() {
 
             prev_state["$pane_target"]="$state"
         done < <(get_panes)
+
+        # Update Windows Terminal tab title and tmux window names
+        update_terminal_title "$SESSION_NAME" "$idle_count" "$total_count"
+        update_window_names "$SESSION_NAME"
 
         sleep "$WATCH_INTERVAL"
     done
@@ -679,10 +738,43 @@ for si in "${!SELECTED_PANES[@]}"; do
     # Set pane title (shows in border via pane-border-status)
     tmux select-pane -t "${SESSION_NAME}:${WINDOW_NAME}.${local_pane}" -T "$entry_label"
 
+    # Initialize per-pane state option (drives dynamic border coloring)
+    tmux set -p -t "${SESSION_NAME}:${WINDOW_NAME}.${local_pane}" @swarm_state "WORKING"
+
     # Send startup commands
     send_to_pane "$SESSION_NAME" "$WINDOW_NAME" "$local_pane" \
         "clear && printf '${entry_banner}\n' && ${CLAUDE_CMD}"
 done
+
+# ── Visual styling (borders, status bar) ─────────────────────────────────────
+# Heavy borders with state-colored labels
+tmux set -t "$SESSION_NAME" pane-border-status top
+tmux set -t "$SESSION_NAME" pane-border-lines heavy
+tmux set -t "$SESSION_NAME" pane-border-indicators arrows
+
+# Border colors: subtle grey for inactive, bright blue for active
+tmux set -t "$SESSION_NAME" pane-border-style "fg=#585858"
+tmux set -t "$SESSION_NAME" pane-active-border-style "fg=#00afff,bold"
+
+# Dynamic border format: reads @swarm_state per-pane option to color-code
+# IDLE → green bold, WORKING → yellow, EXITED → red bold
+BORDER_FMT='#{?#{==:#{@swarm_state},IDLE},'
+BORDER_FMT+='#[fg=#00ff00,bold] #{pane_title} [ IDLE - needs input ]#[default],'
+BORDER_FMT+='#{?#{==:#{@swarm_state},EXITED},'
+BORDER_FMT+='#[fg=#ff0000,bold] #{pane_title} [ EXITED ]#[default],'
+BORDER_FMT+='#[fg=#ffff00] #{pane_title} [ working... ]#[default]}}'
+tmux set -t "$SESSION_NAME" pane-border-format "$BORDER_FMT"
+
+# Status bar styling
+tmux set -t "$SESSION_NAME" status-style "bg=#1c1c1c,fg=#808080"
+tmux set -t "$SESSION_NAME" status-left "#[fg=#00afff,bold] #{session_name} #[default] "
+tmux set -t "$SESSION_NAME" status-right "#[fg=#585858]%H:%M "
+tmux set -t "$SESSION_NAME" window-status-format " #I:#W "
+tmux set -t "$SESSION_NAME" window-status-current-format "#[fg=#00afff,bold] #I:#W #[default]"
+
+# Prevent tmux from overwriting our window names
+tmux set -t "$SESSION_NAME" automatic-rename off
+tmux set -t "$SESSION_NAME" allow-rename off
 
 # ── Bind session-level hotkeys (^b prefix) ───────────────────────────────────
 # ^b c: press Enter in current pane (continue Claude)
