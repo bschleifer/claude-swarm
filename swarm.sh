@@ -782,24 +782,33 @@ tmux set -t "$SESSION_NAME" pane-border-indicators arrows
 tmux set -t "$SESSION_NAME" pane-border-style "fg=#585858"
 tmux set -t "$SESSION_NAME" pane-active-border-style "fg=#00afff,bold"
 
-# Dynamic border format: reads @swarm_state per-pane option to color-code.
-# IDLE → green bold, WORKING → yellow, EXITED → red bold.
+# Dynamic border format: color-coded for active pane, subdued grey for inactive.
 # NOTE: commas inside #[...] break #{?...} conditionals — tmux splits branches
 # on ALL commas, even those inside style blocks. Use separate #[] blocks instead.
-# Also uses @swarm_name instead of pane_title (Claude's TUI overwrites it).
-BORDER_FMT='#{?#{==:#{@swarm_state},IDLE},'
+# Uses @swarm_name instead of pane_title (Claude's TUI overwrites it).
+# Outer conditional: #{pane_active} — colorful for active, grey for inactive.
+BORDER_FMT='#{?#{pane_active},'
+# Active pane: IDLE=green, WORKING=yellow, EXITED=red
+BORDER_FMT+='#{?#{==:#{@swarm_state},IDLE},'
 BORDER_FMT+='#[fg=#00ff00]#[bold] #{@swarm_name} [ IDLE - needs input ]#[default],'
 BORDER_FMT+='#{?#{==:#{@swarm_state},EXITED},'
 BORDER_FMT+='#[fg=#ff0000]#[bold] #{@swarm_name} [ EXITED ]#[default],'
-BORDER_FMT+='#[fg=#ffff00] #{@swarm_name} [ working... ]#[default]}}'
+BORDER_FMT+='#[fg=#ffff00] #{@swarm_name} [ working... ]#[default]}},'
+# Inactive pane: all grey
+BORDER_FMT+='#[fg=#585858] #{@swarm_name} #{?#{==:#{@swarm_state},IDLE},'
+BORDER_FMT+='[ IDLE - needs input ],'
+BORDER_FMT+='#{?#{==:#{@swarm_state},EXITED},'
+BORDER_FMT+='[ EXITED ],'
+BORDER_FMT+='[ working... ]}}#[default]}'
 tmux set -t "$SESSION_NAME" pane-border-format "$BORDER_FMT"
 
 # Status bar styling
 tmux set -t "$SESSION_NAME" status-style "bg=#1c1c1c,fg=#808080"
 tmux set -t "$SESSION_NAME" status-left "#[fg=#00afff,bold] #{session_name} #[default] "
-tmux set -t "$SESSION_NAME" status-right "#[fg=#585858]%H:%M "
+tmux set -t "$SESSION_NAME" status-right "#[fg=#585858]^b c:cont  C:all  r:restart  s:status  n/p:window  z:zoom  d:detach "
+tmux set -t "$SESSION_NAME" status-right-length 80
 tmux set -t "$SESSION_NAME" window-status-format " #I:#W "
-tmux set -t "$SESSION_NAME" window-status-current-format "#[fg=#00afff,bold] #I:#W #[default]"
+tmux set -t "$SESSION_NAME" window-status-current-format "#[fg=#1c1c1c]#[bg=#00afff]#[bold] #I:#W #[default]"
 
 # Prevent tmux from overwriting our window names
 tmux set -t "$SESSION_NAME" automatic-rename off
