@@ -68,7 +68,7 @@ update_terminal_title() {
         SPINNER_IDX=$(( (SPINNER_IDX + 1) % ${#SPINNER_FRAMES[@]} ))
         title="${indicator} swarm: all working"
     else
-        title="✔ swarm: ${idle_count}/${total_count} IDLE"
+        title="🟢 swarm: ${idle_count}/${total_count} IDLE"
     fi
     printf '\033]0;%s\007' "$title" > "$client_tty"
 }
@@ -215,13 +215,16 @@ detect_pane_state() {
         return
     fi
 
-    # Capture the last few lines of the pane to look for Claude's prompt.
+    # Capture the full visible pane (not just the tail — "esc to interrupt"
+    # can appear anywhere on screen depending on scroll position).
     local content
-    content=$(tmux capture-pane -p -t "$target" -S -5 2>/dev/null || echo "")
+    content=$(tmux capture-pane -p -t "$target" 2>/dev/null || echo "")
 
-    # Claude Code shows ">" at the start of a line when waiting for input,
-    # or "? for shortcuts" when idle.
-    if echo "$content" | grep -qE '^\s*[>❯]|^\? for shortcuts|\? for shortcuts$'; then
+    # "esc to interrupt" only appears when Claude is actively processing.
+    # Check this FIRST because the > prompt is visible in both states.
+    if echo "$content" | grep -qF 'esc to interrupt'; then
+        echo "WORKING"
+    elif echo "$content" | grep -qE '^\s*[>❯]|^\? for shortcuts'; then
         echo "IDLE"
     else
         echo "WORKING"
@@ -388,6 +391,9 @@ cmd_watch() {
 
     # Track previous state of each pane so we only notify on transitions.
     declare -A prev_state
+    # Require 2 consecutive IDLE readings before transitioning WORKING→IDLE.
+    # Prevents flickering during brief gaps between Claude tool calls.
+    declare -A idle_confirm
 
     while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
         local idle_count=0 total_count=0
@@ -395,6 +401,17 @@ cmd_watch() {
         while IFS= read -r pane_target; do
             state=$(detect_pane_state "${SESSION_NAME}:${pane_target}")
             prev="${prev_state[$pane_target]:-UNKNOWN}"
+
+            # Hysteresis: only accept WORKING→IDLE after 2 consecutive IDLE reads.
+            if [[ "$state" == "IDLE" && "$prev" == "WORKING" ]]; then
+                idle_confirm["$pane_target"]=$(( ${idle_confirm[$pane_target]:-0} + 1 ))
+                if (( ${idle_confirm[$pane_target]} < 2 )); then
+                    state="WORKING"  # not confirmed yet
+                fi
+            else
+                idle_confirm["$pane_target"]=0
+            fi
+
             total_count=$((total_count + 1))
             [[ "$state" == "IDLE" ]] && idle_count=$((idle_count + 1))
 
@@ -818,7 +835,11 @@ tmux select-window -t "${SESSION_NAME}:${FIRST_WINDOW}"
 tmux select-pane -t "${SESSION_NAME}:${FIRST_WINDOW}.0"
 
 ok "Session '${SESSION_NAME}' created with ${NUM_PANES} agents across ${NUM_WINDOWS} window(s)."
-info "Idle agents flagged with ! in status bar. Run 'swarm watch' for taskbar alerts."
+
+# Auto-start the watch loop in the background (drives border colors, tab title, alerts).
+"$SWARM_PATH" -s "$SESSION_NAME" watch &>/dev/null &
+disown
+
 info "Attaching now... (Detach with Ctrl-b d)"
 echo
 
