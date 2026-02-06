@@ -778,6 +778,9 @@ tmux set -t "$SESSION_NAME" pane-border-status top
 tmux set -t "$SESSION_NAME" pane-border-lines heavy
 tmux set -t "$SESSION_NAME" pane-border-indicators arrows
 
+# Pane background: blue tint on active pane only
+tmux set -t "$SESSION_NAME" window-active-style "bg=#0d1b30"
+
 # Border colors: subtle grey for inactive, bright blue for active
 tmux set -t "$SESSION_NAME" pane-border-style "fg=#585858"
 tmux set -t "$SESSION_NAME" pane-active-border-style "fg=#00afff,bold"
@@ -790,7 +793,7 @@ tmux set -t "$SESSION_NAME" pane-active-border-style "fg=#00afff,bold"
 BORDER_FMT='#{?#{pane_active},'
 # Active pane: IDLE=green, WORKING=yellow, EXITED=red
 BORDER_FMT+='#{?#{==:#{@swarm_state},IDLE},'
-BORDER_FMT+='#[fg=#00ff00]#[bold] #{@swarm_name} [ IDLE - needs input ]#[default],'
+BORDER_FMT+='#[fg=#00afff]#[bold] #{@swarm_name} [ IDLE - needs input ]#[default],'
 BORDER_FMT+='#{?#{==:#{@swarm_state},EXITED},'
 BORDER_FMT+='#[fg=#ff0000]#[bold] #{@swarm_name} [ EXITED ]#[default],'
 BORDER_FMT+='#[fg=#ffff00] #{@swarm_name} [ working... ]#[default]}},'
