@@ -49,19 +49,26 @@ err()   { printf "${RED}[error]${RESET} %s\n" "$*" >&2; }
 
 # ── Dynamic UI helpers ──────────────────────────────────────────────────────
 
+# Braille spinner frames (cycled each poll tick when all agents are working).
+SPINNER_FRAMES=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+SPINNER_IDX=0
+
 # Update the Windows Terminal tab title via OSC 0 escape sequence.
 # Writes to the client TTY (not a pane) so Claude's TUI isn't corrupted.
+# Shows ✔ when agents need input, a spinner when all are working.
 update_terminal_title() {
     local session="$1" idle_count="$2" total_count="$3"
     local client_tty
     client_tty=$(tmux list-clients -t "$session" -F '#{client_tty}' 2>/dev/null | head -1)
     [[ -z "$client_tty" || ! -w "$client_tty" ]] && return
 
-    local title
+    local indicator title
     if (( idle_count == 0 )); then
-        title="swarm: all working"
+        indicator="${SPINNER_FRAMES[$SPINNER_IDX]}"
+        SPINNER_IDX=$(( (SPINNER_IDX + 1) % ${#SPINNER_FRAMES[@]} ))
+        title="${indicator} swarm: all working"
     else
-        title="swarm: ${idle_count}/${total_count} IDLE"
+        title="✔ swarm: ${idle_count}/${total_count} IDLE"
     fi
     printf '\033]0;%s\007' "$title" > "$client_tty"
 }
@@ -738,7 +745,9 @@ for si in "${!SELECTED_PANES[@]}"; do
     # Set pane title (shows in border via pane-border-status)
     tmux select-pane -t "${SESSION_NAME}:${WINDOW_NAME}.${local_pane}" -T "$entry_label"
 
-    # Initialize per-pane state option (drives dynamic border coloring)
+    # Initialize per-pane user options (drives dynamic border coloring).
+    # @swarm_name is used instead of pane_title because Claude's TUI overwrites it.
+    tmux set -p -t "${SESSION_NAME}:${WINDOW_NAME}.${local_pane}" @swarm_name "$entry_label"
     tmux set -p -t "${SESSION_NAME}:${WINDOW_NAME}.${local_pane}" @swarm_state "WORKING"
 
     # Send startup commands
@@ -756,13 +765,16 @@ tmux set -t "$SESSION_NAME" pane-border-indicators arrows
 tmux set -t "$SESSION_NAME" pane-border-style "fg=#585858"
 tmux set -t "$SESSION_NAME" pane-active-border-style "fg=#00afff,bold"
 
-# Dynamic border format: reads @swarm_state per-pane option to color-code
-# IDLE → green bold, WORKING → yellow, EXITED → red bold
+# Dynamic border format: reads @swarm_state per-pane option to color-code.
+# IDLE → green bold, WORKING → yellow, EXITED → red bold.
+# NOTE: commas inside #[...] break #{?...} conditionals — tmux splits branches
+# on ALL commas, even those inside style blocks. Use separate #[] blocks instead.
+# Also uses @swarm_name instead of pane_title (Claude's TUI overwrites it).
 BORDER_FMT='#{?#{==:#{@swarm_state},IDLE},'
-BORDER_FMT+='#[fg=#00ff00,bold] #{pane_title} [ IDLE - needs input ]#[default],'
+BORDER_FMT+='#[fg=#00ff00]#[bold] #{@swarm_name} [ IDLE - needs input ]#[default],'
 BORDER_FMT+='#{?#{==:#{@swarm_state},EXITED},'
-BORDER_FMT+='#[fg=#ff0000,bold] #{pane_title} [ EXITED ]#[default],'
-BORDER_FMT+='#[fg=#ffff00] #{pane_title} [ working... ]#[default]}}'
+BORDER_FMT+='#[fg=#ff0000]#[bold] #{@swarm_name} [ EXITED ]#[default],'
+BORDER_FMT+='#[fg=#ffff00] #{@swarm_name} [ working... ]#[default]}}'
 tmux set -t "$SESSION_NAME" pane-border-format "$BORDER_FMT"
 
 # Status bar styling
