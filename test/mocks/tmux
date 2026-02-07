@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Mock tmux binary for integration tests.
+# Logs all invocations and returns configurable defaults.
+#
+# Usage: PATH="$BATS_TEST_DIRNAME/mocks:$PATH"
+#
+# Environment variables to configure behavior:
+#   MOCK_TMUX_LOG              — file to append invocation logs to
+#   MOCK_TMUX_HAS_SESSION      — exit code for has-session (default: 0 = exists)
+#   MOCK_TMUX_LIST_PANES       — output for list-panes (one target per line)
+#   MOCK_TMUX_CAPTURE_PANE     — output for capture-pane
+#   MOCK_TMUX_DISPLAY_MSG      — default output for display-message
+#   MOCK_TMUX_DISPLAY_MSG_CMD  — output when display-message asks for pane_current_command
+#   MOCK_TMUX_DISPLAY_MSG_PATH — output when display-message asks for pane_current_path
+#   MOCK_TMUX_DISPLAY_MSG_WIN  — output when display-message asks for window_index
+#   MOCK_TMUX_DISPLAY_MSG_PANE — output when display-message asks for pane_index
+#   MOCK_TMUX_SHOW             — output for show (pane options)
+#   MOCK_TMUX_LIST_SESSIONS    — output for list-sessions
+#   MOCK_TMUX_LIST_WINDOWS     — output for list-windows
+#   MOCK_TMUX_LIST_CLIENTS     — output for list-clients
+
+# Log the invocation
+if [[ -n "${MOCK_TMUX_LOG:-}" ]]; then
+    echo "tmux $*" >> "$MOCK_TMUX_LOG"
+fi
+
+subcmd="${1:-}"
+shift || true
+
+case "$subcmd" in
+    has-session)
+        exit "${MOCK_TMUX_HAS_SESSION:-0}"
+        ;;
+    list-panes)
+        echo "${MOCK_TMUX_LIST_PANES:-0.0}"
+        ;;
+    capture-pane)
+        echo "${MOCK_TMUX_CAPTURE_PANE:-}"
+        ;;
+    display-message)
+        # Check what property is being requested by inspecting the arguments
+        args="$*"
+        if [[ "$args" == *"pane_current_command"* ]] && [[ -n "${MOCK_TMUX_DISPLAY_MSG_CMD:-}" ]]; then
+            echo "$MOCK_TMUX_DISPLAY_MSG_CMD"
+        elif [[ "$args" == *"pane_current_path"* ]] && [[ -n "${MOCK_TMUX_DISPLAY_MSG_PATH:-}" ]]; then
+            echo "$MOCK_TMUX_DISPLAY_MSG_PATH"
+        elif [[ "$args" == *"window_index"* ]] && [[ -n "${MOCK_TMUX_DISPLAY_MSG_WIN:-}" ]]; then
+            echo "$MOCK_TMUX_DISPLAY_MSG_WIN"
+        elif [[ "$args" == *"pane_index"* ]] && [[ -n "${MOCK_TMUX_DISPLAY_MSG_PANE:-}" ]]; then
+            echo "$MOCK_TMUX_DISPLAY_MSG_PANE"
+        else
+            echo "${MOCK_TMUX_DISPLAY_MSG:-bash}"
+        fi
+        ;;
+    show)
+        echo "${MOCK_TMUX_SHOW:-}"
+        ;;
+    list-sessions)
+        echo "${MOCK_TMUX_LIST_SESSIONS:-}"
+        ;;
+    list-windows)
+        echo "${MOCK_TMUX_LIST_WINDOWS:-}"
+        ;;
+    list-clients)
+        echo "${MOCK_TMUX_LIST_CLIENTS:-}"
+        ;;
+    set|set-option|set-window-option|select-pane|select-window|rename-window|send-keys|kill-window|kill-session|new-window|new-session|bind|split-window|select-layout|attach-session)
+        # Write commands — just log, no output
+        ;;
+    display-popup|run-shell)
+        # UI commands — just log, no output
+        ;;
+    *)
+        # Unknown command — log and exit success
+        ;;
+esac
